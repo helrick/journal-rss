@@ -1,0 +1,2 @@
+Title	URL
+Cell	https://www.cell.com/cell/current.rss

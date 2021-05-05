@@ -2,4 +2,4 @@
 
 ### Requirements
 * Python3.8
-* + Pipfile
+* See Pipfile

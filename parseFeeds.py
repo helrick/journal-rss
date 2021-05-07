@@ -3,23 +3,54 @@
 import sys
 import os
 import csv
+import argparse
 import feedparser as fp
+import dateutil.parser as dateparser
 from datetime import date
 from slack import WebClient
 from dotenv import load_dotenv
 from html2text import html2text
 
+keywords = ["genomics", "long reads", "long-read", "cancer", "somatic"]
+
+def screen_rss_entries(rss, journal_title):
+    """ see if a keyword appears """
+    screened_entries = []
+    count_skipped = 0
+    for entry in rss.entries:
+        title = entry['title_detail'] if 'title_detail' in entry else entry['title']
+        title = title if 'value' not in title else title.value
+        summary = entry['summary_detail'] if 'summary_detail' in entry else entry['summary']
+        summary = summary if 'value' not in summary else summary.value
+        text = html2text(title+summary).lower()
+        if any([k.lower() in text for k in keywords]):
+            screened_entries.append(entry)
+        else:
+            count_skipped+=1
+
+    print(f'{journal_title}: {count_skipped} entries skipped, {len(screened_entries)} passed')
+    return screened_entries
+
 def format_helper(obj, convert=True):
-    """ get the value if it exists and optionally convert from html """
+    """ get the value if it exists, truncate the text, and optionally convert from html"""
     result = obj if 'value' not in obj else obj.value
-    result = html2text(result)
-    result = result.replace('\n','')
+    result = result.replace('\n',' ')
+    if convert:
+        result = html2text(result)
+    if len(result) > 1500:
+        result = result[0:1500].rsplit(". ",1)[0]
+        result += " ..."
     return result
 
-def format_rss_entries(rss):
+def format_date(datestring):
+    """ convert string to datetime and then to consistent format """
+    parsed_date = dateparser.parse(datestring)
+    return parsed_date.strftime("%B %d, %Y")
+
+def format_rss_entries(screened_entries):
     """ format entries from feedparser object, return list of {'title':'','summary':'','url':''} """
     formatted_entries = []
-    for entry in rss.entries:
+    for entry in screened_entries:
         formatted_entry = {}
         # get title (prefer detail if exists)
         if 'title_detail' in entry:
@@ -35,12 +66,10 @@ def format_rss_entries(rss):
         elif 'summary' in entry:
             formatted_entry['summary'] = format_helper(entry.summary)
         else:
-            print("entry had no summary :( can still use")
             formatted_entry['summary'] = None
-        # get url
-        if 'link' in entry:
-            formatted_entry['url'] = entry.link
-
+        # get url and date if they exist
+        formatted_entry['url'] = entry.link if 'link' in entry else ':x: No Link'
+        formatted_entry['date'] = format_date(entry.date) if 'date' in entry else ':x: No Date'
         formatted_entries.append(formatted_entry)
 
     return formatted_entries
@@ -55,7 +84,8 @@ def parse_feeds(FEEDS_FILE):
             #TODO: add test for malformed
             title, url = row
             rss = fp.parse(url)
-            formatted_entries = format_rss_entries(rss)
+            screened_entries = screen_rss_entries(rss, title)
+            formatted_entries = format_rss_entries(screened_entries)
             parsed_feeds[title] = formatted_entries
 
     return parsed_feeds
@@ -82,7 +112,7 @@ def create_blocks(parsed_feeds):
     for feed, entries in parsed_feeds.items():
         for entry in entries:
             formatted_url = entry['url'].replace('?rss=1','')
-            msg_section = f'*{entry["title"]}*\n{feed}: {formatted_url}\n\n{entry["summary"]}'
+            msg_section = f'*{entry["title"]}*\n{entry["date"]}\n{feed}: {formatted_url}\n\n{entry["summary"]}'
             blocks.append(block_helper(msg_section))
             blocks.append({"type": "divider"})
 
@@ -103,11 +133,19 @@ def send_message(channel, blocks, token):
 
 def main():
 
+    # arguments
     load_dotenv()
     SLACK_TOKEN = os.getenv("SLACK_TOKEN")
     CHANNEL = os.getenv("CHANNEL")
     FEEDS_FILE = os.getenv("FEEDS_FILE")
-
+    # if feeds file passed on command-line, override
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-f','--feeds', dest='passed_feeds', help='pass the feeds file on the command-line to override the .env file')
+    args = parser.parse_args()
+    if args.passed_feeds:
+        print("Overriding .env with command-line passed feeds")
+        FEEDS_FILE = args.passed_feeds
+    # parse and send
     parsed_feeds = parse_feeds(FEEDS_FILE)
     blocks = create_blocks(parsed_feeds)
     send_message(CHANNEL, blocks, SLACK_TOKEN)

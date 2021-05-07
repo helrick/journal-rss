@@ -8,6 +8,8 @@ feedparser = "*"
 python-dotenv = "*"
 slackclient = "*"
 html2text = "*"
+pip = "*"
+python-dateutil = "*"
 
 [dev-packages]
 

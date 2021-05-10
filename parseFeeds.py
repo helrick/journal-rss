@@ -5,30 +5,48 @@ import os
 import csv
 import argparse
 import feedparser as fp
+import sqlite3 as sq
 import dateutil.parser as dateparser
 from datetime import date
 from slack import WebClient
 from dotenv import load_dotenv
 from html2text import html2text
 
-keywords = ["genomics", "long reads", "long-read", "cancer", "somatic"]
+TODAY = date.today().strftime("%B %d, %Y")
+KEYWORDS = ["genomics", "long reads", "long-read", "cancer", "somatic"]
 
-def screen_rss_entries(rss, journal_title):
-    """ see if a keyword appears """
+def screen_rss_entries(rss, journal_title, db_connection):
+    """ see if a keyword appears or if it's already in the database """
+    cursor = db_connection.cursor()
     screened_entries = []
+    insertion_tuples = []
+    count_seen = 0
     count_skipped = 0
     for entry in rss.entries:
         title = entry['title_detail'] if 'title_detail' in entry else entry['title']
         title = title if 'value' not in title else title.value
         summary = entry['summary_detail'] if 'summary_detail' in entry else entry['summary']
         summary = summary if 'value' not in summary else summary.value
-        text = html2text(title+summary).lower()
-        if any([k.lower() in text for k in keywords]):
-            screened_entries.append(entry)
+        link = entry['link'] if 'link' in entry else None
+        if link:
+            cursor.execute("SELECT * FROM articles WHERE link=?", (link,))
         else:
-            count_skipped+=1
+            cursor.execute("SELECT * FROM articles WHERE title=?", (title,))
+        if not cursor.fetchall():
+            # article not seen yet
+            text = html2text(title+summary).lower()
+            if any([k.lower() in text for k in KEYWORDS]):
+                # has an interesting keyword
+                screened_entries.append(entry)
+                insertion_tuples.append((link,TODAY,title))
+            else:
+                count_skipped+=1
+        else:
+            count_seen+=1
 
-    print(f'{journal_title}: {count_skipped} entries skipped, {len(screened_entries)} passed')
+    INSERT_SQL = "INSERT INTO articles (link, date_seen, title) VALUES (?,?,?)"
+    cursor.executemany(INSERT_SQL, insertion_tuples)
+    print(f'{journal_title}: {len(screened_entries)} passed, {count_seen} entries already seen, {count_skipped} entries skipped')
     return screened_entries
 
 def format_helper(obj, convert=True):
@@ -74,8 +92,24 @@ def format_rss_entries(screened_entries):
 
     return formatted_entries
 
-def parse_feeds(FEEDS_FILE):
-    """ read in the different feeds and collect the articles """
+def connect_database(DATABASE):
+    """ initialize database if it doesn't exist and return a cursor """
+    connection = sq.connect(DATABASE)
+    cursor = connection.cursor()
+    create_table_sql = '''
+    CREATE TABLE IF NOT EXISTS articles(
+        id integer primary key,
+        link text,
+        date_seen text,
+        title text
+    );
+    '''
+    cursor.execute(create_table_sql)
+    return connection
+
+def parse_feeds(FEEDS_FILE, DATABASE):
+    """ read in the different feeds and collect the articles that haven't been seen """
+    db_connection = connect_database(DATABASE)
     parsed_feeds = {}
     with open(FEEDS_FILE) as feeds_tsv:
         tsv_reader = csv.reader(feeds_tsv, delimiter="\t")
@@ -84,10 +118,12 @@ def parse_feeds(FEEDS_FILE):
             #TODO: add test for malformed
             title, url = row
             rss = fp.parse(url)
-            screened_entries = screen_rss_entries(rss, title)
+            screened_entries = screen_rss_entries(rss, title, db_connection)
             formatted_entries = format_rss_entries(screened_entries)
-            parsed_feeds[title] = formatted_entries
+            if formatted_entries:
+                parsed_feeds[title] = formatted_entries
 
+    db_connection.commit()
     return parsed_feeds
 
 def block_helper(msg_text):
@@ -105,8 +141,7 @@ def block_helper(msg_text):
 def create_blocks(parsed_feeds):
     """ create blocks for slackbot message """
     blocks = []
-    today = date.today().strftime("%B %d, %Y")
-    msg_title = f':sparkles: Daily Digest: *{today}* :sparkles:'
+    msg_title = f':sparkles: Daily Digest: *{TODAY}* :sparkles:'
     blocks.append(block_helper(msg_title))
     blocks.append({"type": "divider"})
     for feed, entries in parsed_feeds.items():
@@ -138,6 +173,8 @@ def main():
     SLACK_TOKEN = os.getenv("SLACK_TOKEN")
     CHANNEL = os.getenv("CHANNEL")
     FEEDS_FILE = os.getenv("FEEDS_FILE")
+    DATABASE = os.getenv("DATABASE")
+
     # if feeds file passed on command-line, override
     parser = argparse.ArgumentParser()
     parser.add_argument('-f','--feeds', dest='passed_feeds', help='pass the feeds file on the command-line to override the .env file')
@@ -146,9 +183,12 @@ def main():
         print("Overriding .env with command-line passed feeds")
         FEEDS_FILE = args.passed_feeds
     # parse and send
-    parsed_feeds = parse_feeds(FEEDS_FILE)
-    blocks = create_blocks(parsed_feeds)
-    send_message(CHANNEL, blocks, SLACK_TOKEN)
+    parsed_feeds = parse_feeds(FEEDS_FILE, DATABASE)
+    if parsed_feeds:
+        blocks = create_blocks(parsed_feeds)
+        send_message(CHANNEL, blocks, SLACK_TOKEN)
+    else:
+        print("* All articles have either already been seen or didn't contain keywords. No message sent *")
 
 if __name__ == "__main__":
     main()

@@ -13,9 +13,8 @@ from dotenv import load_dotenv
 from html2text import html2text
 
 TODAY = date.today().strftime("%B %d, %Y")
-KEYWORDS = ["genomics", "long reads", "long-read", "cancer", "somatic"]
 
-def screen_rss_entries(rss, journal_title, db_connection):
+def screen_rss_entries(rss, journal_title, keywords, db_connection):
     """ see if a keyword appears or if it's already in the database """
     cursor = db_connection.cursor()
     screened_entries = []
@@ -35,7 +34,7 @@ def screen_rss_entries(rss, journal_title, db_connection):
         if not cursor.fetchall():
             # article not seen yet
             text = html2text(title+summary).lower()
-            if any([k.lower() in text for k in KEYWORDS]):
+            if any([k.lower() in text for k in keywords]):
                 # has an interesting keyword
                 screened_entries.append(entry)
                 insertion_tuples.append((link,TODAY,title))
@@ -52,12 +51,12 @@ def screen_rss_entries(rss, journal_title, db_connection):
 def format_helper(obj, convert=True):
     """ get the value if it exists, truncate the text, and optionally convert from html"""
     result = obj if 'value' not in obj else obj.value
-    result = result.replace('\n',' ')
     if convert:
         result = html2text(result)
-    if len(result) > 1500:
-        result = result[0:1500].rsplit(". ",1)[0]
+    if len(result) > 500:
+        result = result[0:500].rsplit(". ",1)[0]
         result += " ..."
+    result = result.replace('\n',' ')
     return result
 
 def format_date(datestring):
@@ -72,9 +71,9 @@ def format_rss_entries(screened_entries):
         formatted_entry = {}
         # get title (prefer detail if exists)
         if 'title_detail' in entry:
-            formatted_entry['title'] = format_helper(entry.title_detail, convert=False)
+            formatted_entry['title'] = format_helper(entry.title_detail, convert=True)
         elif 'title' in entry:
-            formatted_entry['title'] = format_helper(entry.title, convert=False)
+            formatted_entry['title'] = format_helper(entry.title, convert=True)
         else:
             print("entry had no title, skipping")
             continue
@@ -87,7 +86,7 @@ def format_rss_entries(screened_entries):
             formatted_entry['summary'] = None
         # get url and date if they exist
         formatted_entry['url'] = entry.link if 'link' in entry else ':x: No Link'
-        formatted_entry['date'] = format_date(entry.date) if 'date' in entry else ':x: No Date'
+        formatted_entry['date'] = format_date(entry.date) if 'date' in entry else ':question: No RSS Date'
         formatted_entries.append(formatted_entry)
 
     return formatted_entries
@@ -107,7 +106,7 @@ def connect_database(DATABASE):
     cursor.execute(create_table_sql)
     return connection
 
-def parse_feeds(FEEDS_FILE, DATABASE):
+def parse_feeds(FEEDS_FILE, keywords, DATABASE):
     """ read in the different feeds and collect the articles that haven't been seen """
     db_connection = connect_database(DATABASE)
     parsed_feeds = {}
@@ -118,7 +117,7 @@ def parse_feeds(FEEDS_FILE, DATABASE):
             #TODO: add test for malformed
             title, url = row
             rss = fp.parse(url)
-            screened_entries = screen_rss_entries(rss, title, db_connection)
+            screened_entries = screen_rss_entries(rss, title, keywords, db_connection)
             formatted_entries = format_rss_entries(screened_entries)
             if formatted_entries:
                 parsed_feeds[title] = formatted_entries
@@ -166,6 +165,17 @@ def send_message(channel, blocks, token):
         resp = slack_web_client.chat_postMessage(channel=channel, blocks=chunk)
         resp.validate()
 
+def read_keywords(KEYWORDS_FILE):
+    """ convert to list and convert to lowercase """
+    keywords = None
+    if os.path.exists(KEYWORDS_FILE):
+        with open(KEYWORDS_FILE) as text_file:
+            keywords = [(line.strip()).lower() for line in text_file]
+    else:
+        sys.exit(f'Keywords file: {KEYWORDS_FILE} not found')
+
+    return keywords
+
 def main():
 
     # arguments
@@ -173,18 +183,27 @@ def main():
     SLACK_TOKEN = os.getenv("SLACK_TOKEN")
     CHANNEL = os.getenv("CHANNEL")
     FEEDS_FILE = os.getenv("FEEDS_FILE")
+    KEYWORDS_FILE = os.getenv("KEYWORDS_FILE")
     DATABASE = os.getenv("DATABASE")
 
-    # if feeds file passed on command-line, override
+    # if feeds or keywords file passed on command-line, override
     parser = argparse.ArgumentParser()
     parser.add_argument('-f','--feeds', dest='passed_feeds', help='pass the feeds file on the command-line to override the .env file')
+    parser.add_argument('-k','--keywords', dest='keywords', help='pass the keywords file on the command-line to override the .env file')
+
     args = parser.parse_args()
     if args.passed_feeds:
         print("Overriding .env with command-line passed feeds")
         FEEDS_FILE = args.passed_feeds
-    # parse and send
-    parsed_feeds = parse_feeds(FEEDS_FILE, DATABASE)
+    if args.keywords:
+        print("Overriding .env with command-line passed keywords")
+        KEYWORDS_FILE = args.keywords
+
+    # convert keywords to list
+    keywords = read_keywords(KEYWORDS_FILE)
+    parsed_feeds = parse_feeds(FEEDS_FILE, keywords, DATABASE)
     if parsed_feeds:
+        # if articles passed, format and send message
         blocks = create_blocks(parsed_feeds)
         send_message(CHANNEL, blocks, SLACK_TOKEN)
     else:

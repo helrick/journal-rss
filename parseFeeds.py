@@ -25,7 +25,7 @@ def screen_rss_entries(rss, journal_title, keywords, db_connection):
         title = entry['title_detail'] if 'title_detail' in entry else entry['title']
         title = title if 'value' not in title else title.value
         summary = entry['summary_detail'] if 'summary_detail' in entry else entry['summary']
-        summary = summary if 'value' not in summary else summary.value
+        summary = summary if isinstance(summary,str) or 'value' not in summary else summary.value
         link = entry['link'] if 'link' in entry else None
         if link:
             cursor.execute("SELECT * FROM articles WHERE link=?", (link,))
@@ -137,6 +137,14 @@ def block_helper(msg_text):
     block_template['text'].update({'text': msg_text})
     return block_template
 
+def remove_rss_url(url):
+    """ remove the rss-specific url from the link """
+    rss_endings = ['?rss=1','?rss=yes']
+    for ending in rss_endings:
+        if url.endswith(ending):
+            return url[:-len(ending)]
+    return url
+
 def create_blocks(parsed_feeds):
     """ create blocks for slackbot message """
     blocks = []
@@ -145,11 +153,10 @@ def create_blocks(parsed_feeds):
     blocks.append({"type": "divider"})
     for feed, entries in parsed_feeds.items():
         for entry in entries:
-            formatted_url = entry['url'].replace('?rss=1','')
+            formatted_url = remove_rss_url(entry['url'])
             msg_section = f'*{entry["title"]}*\n{entry["date"]}\n{feed}: {formatted_url}\n\n{entry["summary"]}'
             blocks.append(block_helper(msg_section))
             blocks.append({"type": "divider"})
-
     return blocks
 
 def chunk_message(blocks, n=50):

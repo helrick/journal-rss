@@ -24,8 +24,13 @@ def screen_rss_entries(rss, journal_title, keywords, db_connection):
     for entry in rss.entries:
         title = entry['title_detail'] if 'title_detail' in entry else entry['title']
         title = title if 'value' not in title else title.value
-        summary = entry['summary_detail'] if 'summary_detail' in entry else entry['summary']
-        summary = summary if isinstance(summary,str) or 'value' not in summary else summary.value
+        summary = entry['summary_detail'] if 'summary_detail' in entry else entry.get('summary', None)
+        if summary:
+            summary = summary if isinstance(summary,str) or 'value' not in summary else summary.get('value',None)
+        else:
+            # no summary available in entry; set to blank
+            summary = ''
+
         link = entry['link'] if 'link' in entry else None
         if link:
             cursor.execute("SELECT * FROM articles WHERE link=?", (link,))
@@ -186,7 +191,7 @@ def read_keywords(KEYWORDS_FILE):
 def main():
 
     # arguments
-    load_dotenv()
+    load_dotenv(override=True)
     SLACK_TOKEN = os.getenv("SLACK_TOKEN")
     CHANNEL = os.getenv("CHANNEL")
     FEEDS_FILE = os.getenv("FEEDS_FILE")

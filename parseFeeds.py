@@ -55,7 +55,11 @@ def screen_rss_entries(rss, journal_title, keywords, db_connection):
 
 def format_helper(obj, convert=True):
     """ get the value if it exists, truncate the text, and optionally convert from html"""
-    result = obj if 'value' not in obj else obj.value
+    try:
+        result = obj if 'value' not in obj else obj.value
+    except AttributeError as error:
+        # throws error when obj is a string
+        result = obj
     if convert:
         result = html2text(result)
     if len(result) > 500:
